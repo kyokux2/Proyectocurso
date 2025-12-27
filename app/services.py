@@ -52,3 +52,61 @@ def subscribe(db: Session, email: str, plan_id: int, idempotency_key: str, force
     db.add(tx)
     db.flush()
     return tx, sub
+def run_renewals(db: Session, now=None):
+    from datetime import datetime, timezone, timedelta
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    subs = db.execute(
+        select(Subscription).where(
+            Subscription.status == SubStatus.active,
+            Subscription.current_period_end <= now
+        )
+    ).scalars().all()
+
+    renewed = 0
+    failed = 0
+
+    for sub in subs:
+        plan = db.get(Plan, sub.plan_id)
+        user = db.get(User, sub.user_id)
+
+        period_key = f"renew-{sub.id}-{sub.current_period_end.date()}"
+
+        existing = db.execute(
+            select(Transaction).where(Transaction.idempotency_key == period_key)
+        ).scalar_one_or_none()
+        if existing:
+            continue
+
+        ok = True
+        if "fail" in user.email:
+            ok = False
+
+        if ok:
+            sub.current_period_end = now + timedelta(days=plan.period_days)
+            tx = Transaction(
+                user_id=user.id,
+                subscription_id=sub.id,
+                amount=plan.price,
+                currency="RUB",
+                status=TxStatus.succeeded,
+                idempotency_key=period_key
+            )
+            db.add(tx)
+            renewed += 1
+        else:
+            sub.status = SubStatus.past_due
+            tx = Transaction(
+                user_id=user.id,
+                subscription_id=sub.id,
+                amount=plan.price,
+                currency="RUB",
+                status=TxStatus.failed,
+                idempotency_key=period_key
+            )
+            db.add(tx)
+            failed += 1
+
+    return {"checked": len(subs), "renewed": renewed, "failed": failed}
+

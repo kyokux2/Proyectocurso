@@ -5,6 +5,8 @@ from .db import Base, engine, get_db
 from .models import Plan
 from .schemas import PlanOut, SubscribeIn, SubscribeOut
 from .services import subscribe
+from .models import User, Subscription, Transaction
+
 
 app = FastAPI(title="Subscription MVP")
 
@@ -60,3 +62,58 @@ def post_subscribe(payload: SubscribeIn, db: Session = Depends(get_db)):
         "status": sub.status,
         "current_period_end": sub.current_period_end
     }
+@app.get("/me/subscription")
+def my_subscription(email: str, db: Session = Depends(get_db)):
+    user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    sub = db.execute(
+        select(Subscription).where(Subscription.user_id == user.id).order_by(Subscription.id.desc())
+    ).scalar_one_or_none()
+
+    if not sub:
+        return {"subscription": None}
+
+    return {
+        "subscription": {
+            "id": sub.id,
+            "status": sub.status,
+            "plan_id": sub.plan_id,
+            "current_period_end": sub.current_period_end,
+        }
+    }
+
+@app.get("/me/transactions")
+def my_transactions(email: str, db: Session = Depends(get_db)):
+    user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    txs = db.execute(
+        select(Transaction).where(Transaction.user_id == user.id).order_by(Transaction.id.desc())
+    ).scalars().all()
+
+    return {
+        "transactions": [
+            {
+                "id": t.id,
+                "subscription_id": t.subscription_id,
+                "amount": str(t.amount),
+                "currency": t.currency,
+                "status": t.status,
+                "idempotency_key": t.idempotency_key,
+                "created_at": t.created_at,
+            }
+            for t in txs
+        ]
+    }
+from .services import run_renewals
+
+@app.post("/internal/run-renewals")
+def trigger_renewals(db: Session = Depends(get_db)):
+    result = run_renewals(db)
+    db.commit()
+    return result
+
+
